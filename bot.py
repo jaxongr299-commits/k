@@ -31,6 +31,7 @@ load_dotenv()
 
 # ======================== safe_task ========================
 def safe_task(coro):
+    """Background tasklarni xavfsiz ishga tushirish va xatolarni log qilish"""
     task = asyncio.create_task(coro)
     def _log_exc(t):
         try:
@@ -46,6 +47,10 @@ _mandatory_cache = {"data": None, "timestamp": 0, "ttl": 60}
 _ad_cache = {"data": None, "timestamp": 0, "ttl": 120}
 _last_activity_cache = {}
 ACTIVITY_UPDATE_INTERVAL = 300
+
+# ✅ YANGI: Reklama rate-limit (har bir foydalanuvchi uchun)
+_ad_sent_cache = {}
+AD_SEND_INTERVAL = 3600  # 1 soat
 
 
 async def get_cached_mandatory_subs():
@@ -74,22 +79,14 @@ def invalidate_ad_cache():
     _ad_cache["timestamp"] = 0
 
 
-# ======================== Doimiy majburiy obunalar ========================
-# ✅ TELEGRAM — tekshiriladi
-# ✅ INSTAGRAM — tekshirilmaydi, lekin "Obuna bo'ldim" bosilganda bajarilgan hisoblanadi
+# ======================== Doimiy majburiy obuna ========================
 PERMANENT_MANDATORY_SUBS = [
     {
         "type": "telegram",
-        "identifier": "@kinomixbott",
+        "identifier": "@mpmpmpmp33",
         "limit": 999999,
         "chat_id": None
-    },
-    {
-        "type": "instagram",
-        "identifier": "https://www.instagram.com/kinomix_bott",
-        "limit": 999999,
-        "chat_id": None
-    },
+    }
 ]
 
 # ======================== Holatlar ========================
@@ -106,10 +103,9 @@ if not RENDER_EXTERNAL_HOSTNAME:
 WEBHOOK_URL = f"https://{RENDER_EXTERNAL_HOSTNAME}{WEBHOOK_PATH}"
 
 # ======================== Bot sozlamalari ========================
-BOT_USERNAME = "Darko_fxbot"
-CHANNEL_USERNAME = "@kinomixbott"
-CHANNEL_URL = "https://t.me/kinomixbott"
-INSTAGRAM_URL = "https://www.instagram.com/kinomix_bott"
+BOT_USERNAME = "@Kinolarolami7bot"
+CHANNEL_USERNAME = "@kinolar_olami_i7"
+CHANNEL_URL = "https://t.me/kinolar_olami_i7"
 
 
 # ======================== SELF-PING ========================
@@ -132,6 +128,10 @@ async def webhook_watchdog():
     while True:
         await asyncio.sleep(240)
         try:
+            # ✅ TUZATILDI: bot_application None bo'lishini tekshirish
+            if bot_application is None:
+                print("⚠️ Watchdog: bot_application hali None")
+                continue
             info = await bot_application.bot.get_webhook_info()
             if info.pending_update_count > 10 or info.last_error_message:
                 print(f"⚠️ Webhook muammosi: pending={info.pending_update_count}, error={info.last_error_message}")
@@ -168,6 +168,13 @@ async def track_activity(update: Update, context: CallbackContext):
 
 # ======================== Reklama ========================
 async def send_ad(bot, chat_id):
+    # ✅ YANGI: Rate-limit — har bir foydalanuvchiga 1 soatda 1 marta
+    now = time.time()
+    last_sent = _ad_sent_cache.get(chat_id, 0)
+    if now - last_sent < AD_SEND_INTERVAL:
+        return
+    _ad_sent_cache[chat_id] = now
+
     ad = await get_cached_ad()
     if not ad:
         return
@@ -195,107 +202,67 @@ async def send_ad(bot, chat_id):
         print(f"Reklama yuborishda xatolik: {e}")
 
 
-# ======================== URL YORDAMCHI ========================
-def build_channel_url(sub_type: str, identifier: str):
-    if not identifier:
-        return None
-    ident = identifier.strip()
-    if not ident:
-        return None
-
-    if ident.startswith("http://") or ident.startswith("https://"):
-        return ident
-
-    if "t.me/+" in ident or "joinchat" in ident:
-        return f"https://{ident.lstrip('@')}"
-
-    if ident.startswith("t.me/"):
-        return f"https://{ident}"
-
-    if sub_type in ("telegram", "group", "bot"):
-        username = ident.lstrip("@").split("/")[-1].split("?")[0]
-        if not username:
-            return None
-        if sub_type == "bot":
-            return f"https://t.me/{username}?start=start"
-        return f"https://t.me/{username}"
-
-    if sub_type == "invite":
-        return f"https://t.me/{ident.lstrip('@')}"
-
-    if sub_type in ("youtube", "instagram", "website"):
-        return ident if ident.startswith("http") else f"https://{ident}"
-
-    return ident if ident.startswith("http") else f"https://{ident}"
-
-
 # ======================== Telegram a'zolik tekshiruvi ========================
 async def check_telegram_membership(bot, user_id, sub_data):
     """
-    True  → a'zo
-    False → a'zo emas
-    None  → tekshirib bo'lmadi (kanal topilmadi / bot admin emas)
+    Qaytaradi:
+      True  — a'zo
+      False — a'zo emas
+      None  — tekshirib bo'lmadi (xato)
     """
     try:
         chat_id = None
         if sub_data.get("chat_id"):
             chat_id = sub_data["chat_id"]
         else:
-            identifier = (sub_data.get("identifier") or "").strip()
-            if not identifier:
-                return None
-
-            if identifier.startswith("http"):
+            identifier = sub_data["identifier"]
+            if identifier.startswith("@"):
+                chat_id = identifier
+            elif "t.me/" in identifier:
                 if "t.me/+" in identifier or "joinchat" in identifier:
                     try:
                         chat = await bot.get_chat(identifier)
                         chat_id = chat.id
                     except Exception as e:
-                        print(f"ℹ️ Invite linkdan chat olish imkonsiz: {e}")
+                        print(f"Zayafka linkdan chat olishda xatolik: {e}")
                         return None
                 else:
-                    part = identifier.rstrip("/").split("/")[-1].split("?")[0]
-                    if part:
-                        chat_id = "@" + part
-                    else:
-                        return None
-            elif identifier.startswith("@"):
-                chat_id = identifier
-            elif identifier.startswith("t.me/"):
-                part = identifier.rstrip("/").split("/")[-1].split("?")[0]
-                chat_id = "@" + part
+                    parts = identifier.split("/")
+                    if len(parts) >= 2:
+                        chat_id = "@" + parts[-1]
             else:
                 chat_id = "@" + identifier.lstrip("@")
-
         if not chat_id:
             return None
-
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-        return member.status in ("member", "administrator", "creator", "restricted")
+        return member.status in ["member", "administrator", "creator"]
     except Exception as e:
-        msg = str(e).lower()
-        if "chat not found" in msg:
-            print(f"⚠️ Chat topilmadi: {sub_data.get('identifier')}")
-            return None
-        if "bot is not a member" in msg or "not enough rights" in msg:
-            print(f"⚠️ Bot kanalga admin emas: {sub_data.get('identifier')}")
-            return None
         print(f"Membership check error: {e}")
-        return None
+        return None  # ✅ TUZATILDI: False emas, None (aniqlanmadi)
 
 
 # ======================== Majburiy obuna interfeysi ========================
 async def show_mandatory_subs(update: Update, context: CallbackContext):
-    """Majburiy obunalar ro'yxatini ko'rsatadi.
-    update.message yoki update.callback_query.message orqali ishlaydi.
     """
-    user_id = update.effective_user.id
+    Majburiy obunalar ro'yxatini ko'rsatadi.
+    Qaytaradi: True — hammasi bajarilgan, False — hali bajarilmagan
+    """
+    # ✅ TUZATILDI: callback_query ham qo'llab-quvvatlanadi
+    if update.callback_query:
+        message = update.callback_query.message
+        user_id = update.callback_query.from_user.id
+    else:
+        message = update.message
+        user_id = update.effective_user.id
+
     subs = await get_cached_mandatory_subs()
     if not subs:
         return True
 
     incomplete = []
     for sub in subs:
+        if "id" not in sub:
+            continue
         is_completed = await is_user_completed_sub(user_id, sub["id"])
         if not is_completed:
             incomplete.append(sub)
@@ -305,62 +272,52 @@ async def show_mandatory_subs(update: Update, context: CallbackContext):
 
     text = "🔔 <b>Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:</b>\n\n"
     url_buttons = []
-    skipped = []
 
     for idx, sub in enumerate(incomplete, start=1):
         sub_type = sub["type"]
         identifier = sub["identifier"]
         button_text = f"📢 {idx}-kanal"
 
-        url = build_channel_url(sub_type, identifier)
-        if not url:
-            skipped.append(f"{idx}-{identifier}")
-            print(f"⚠️ URL yasab bo'lmadi: {identifier} (tur: {sub_type})")
-            continue
-
-        if not (url.startswith("http://") or url.startswith("https://")):
-            skipped.append(f"{idx}-{identifier} (noto'g'ri URL)")
-            print(f"⚠️ Noto'g'ri URL o'tkazib yuborildi: {url}")
-            continue
+        if sub_type in ("telegram", "group"):
+            if identifier.startswith("@"):
+                url = f"https://t.me/{identifier[1:]}"
+            elif identifier.startswith("https://"):
+                url = identifier
+            else:
+                url = f"https://t.me/{identifier}"
+        elif sub_type == "invite":
+            url = identifier
+        elif sub_type == "bot":
+            bot_username = identifier.replace("@", "").replace("https://t.me/", "").split("?")[0].split("/")[-1]
+            url = f"https://t.me/{bot_username}?start=start"
+        elif sub_type in ("youtube", "instagram", "website"):
+            url = identifier
+        else:
+            url = identifier
 
         url_buttons.append([InlineKeyboardButton(button_text, url=url)])
-
-    if not url_buttons:
-        print(f"⚠️ Barcha URL'lar noto'g'ri, o'tkazib yuborildi: {skipped}")
-        return True
 
     confirm_button = [[InlineKeyboardButton("✅ Obuna bo'ldim", callback_data="confirm_all_subs")]]
     reply_markup = InlineKeyboardMarkup(url_buttons + confirm_button)
 
-    # Eski xabarni o'chirish
+    # ✅ TUZATILDI: eski xabarni o'chirish
     if "mandatory_msg_id" in context.user_data:
         try:
             await context.bot.delete_message(
-                chat_id=user_id,
-                message_id=context.user_data["mandatory_msg_id"]
+                chat_id=user_id, message_id=context.user_data["mandatory_msg_id"]
             )
         except Exception:
             pass
-
-    # ✅ TUZATILDI: update.message yoki callback_query.message ni ishlatish
-    target_message = None
-    if update.message:
-        target_message = update.message
-    elif update.callback_query and update.callback_query.message:
-        target_message = update.callback_query.message
-
-    if not target_message:
-        print("⚠️ show_mandatory_subs: xabar topilmadi")
-        return False
+        context.user_data.pop("mandatory_msg_id", None)
 
     try:
-        sent_msg = await target_message.reply_text(
-            text, reply_markup=reply_markup,
-            parse_mode="HTML", disable_web_page_preview=True
+        sent_msg = await message.reply_text(
+            text, reply_markup=reply_markup, parse_mode="HTML",
+            disable_web_page_preview=True
         )
         context.user_data["mandatory_msg_id"] = sent_msg.message_id
     except Exception as e:
-        print(f"❌ show_mandatory_subs xatosi: {e}")
+        print(f"show_mandatory_subs xatosi: {e}")
 
     return False
 
@@ -372,7 +329,7 @@ async def check_and_handle_mandatory_subs(update: Update, context: CallbackConte
     cache_time_key = "sub_check_time"
     current_time = time.time()
 
-    # 30 sekundlik kesh
+    # 30 soniyalik cache (faqat tez-tez tekshirishni oldini olish uchun)
     if cache_time_key in context.user_data:
         if current_time - context.user_data[cache_time_key] < 30:
             if context.user_data.get(cache_key, False):
@@ -386,11 +343,12 @@ async def check_and_handle_mandatory_subs(update: Update, context: CallbackConte
         context.user_data[cache_time_key] = current_time
         return False
 
-    # ✅ Faqat Telegram turlari tekshiriladi
     telegram_types = ["telegram", "group", "invite"]
 
     async def check_sub(sub):
         try:
+            if "id" not in sub:
+                return (sub, True)
             already_completed = await is_user_completed_sub(user_id, sub["id"])
             if sub["type"] in telegram_types:
                 result = await asyncio.wait_for(
@@ -406,22 +364,32 @@ async def check_and_handle_mandatory_subs(update: Update, context: CallbackConte
                         await set_user_completed_sub(user_id, sub["id"], False)
                     return (sub, False)
                 else:
-                    # None — tekshirib bo'lmadi → bloklamaymiz
-                    return (sub, True)
+                    # ✅ TUZATILDI: None — tekshirib bo'lmadi, eski holatni saqlaymiz
+                    return (sub, already_completed)
             else:
-                # ✅ Tashqi platformalar (instagram, youtube, website, bot)
-                # Faqat "Obuna bo'ldim" bosilgan bo'lsa bajarilgan hisoblanadi
+                # Non-telegram turlar: faqat "Obuna bo'ldim" bosilganda belgilanadi
                 return (sub, already_completed)
         except asyncio.TimeoutError:
-            print(f"⚠️ Obuna timeout: {sub['identifier']}")
-            return (sub, True)
+            print(f"⚠️ Obuna timeout: {sub.get('identifier', '?')}")
+            return (sub, False)
         except Exception as e:
             print(f"check_sub xatosi: {e}")
-            return (sub, True)
+            return (sub, False)
 
-    results = await asyncio.gather(*[check_sub(sub) for sub in subs], return_exceptions=False)
+    # ✅ TUZATILDI: return_exceptions=True — bitta xato butun gather'ni yiqitmaydi
+    results = await asyncio.gather(
+        *[check_sub(sub) for sub in subs], return_exceptions=True
+    )
 
-    incomplete = [sub for sub, is_ok in results if not is_ok]
+    incomplete = []
+    for r in results:
+        if isinstance(r, Exception):
+            print(f"⚠️ check_sub exception: {r}")
+            continue
+        sub, is_ok = r
+        if not is_ok:
+            incomplete.append(sub)
+
     context.user_data[cache_time_key] = current_time
     if incomplete:
         context.user_data[cache_key] = True
@@ -435,22 +403,39 @@ async def check_and_handle_mandatory_subs(update: Update, context: CallbackConte
 # ======================== Callback: obunani tasdiqlash ========================
 async def confirm_all_subs_callback(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception as e:
+        print(f"query.answer xatosi: {e}")
+
     user_id = update.effective_user.id
+
+    # ✅ TUZATILDI: cache ni tozalash — foydalanuvchi hoziroq tekshirilsin
+    context.user_data.pop("sub_check_cache", None)
+    context.user_data.pop("sub_check_time", None)
 
     subs = await get_cached_mandatory_subs()
     if not subs:
-        await query.edit_message_text("✅ Hech qanday majburiy obuna mavjud emas.")
+        try:
+            await query.edit_message_text("✅ Hech qanday majburiy obuna mavjud emas.")
+        except Exception:
+            pass
         await start_after_subs(update, context)
         return
 
+    # ✅ TUZATILDI: faqat haqiqiy incomplete ro'yxatini olish
     still_incomplete = []
     for sub in subs:
+        if "id" not in sub:
+            continue
         if not await is_user_completed_sub(user_id, sub["id"]):
             still_incomplete.append(sub)
 
     if not still_incomplete:
-        await query.edit_message_text("✅ Barcha kanallarga obuna bo'lgansiz!")
+        try:
+            await query.edit_message_text("✅ Barcha kanallarga obuna bo'lgansiz!")
+        except Exception:
+            pass
         await start_after_subs(update, context)
         return
 
@@ -463,22 +448,33 @@ async def confirm_all_subs_callback(update: Update, context: CallbackContext):
                     check_telegram_membership(context.bot, user_id, sub),
                     timeout=5.0
                 )
+                # ✅ TUZATILDI: None → False (xavfsizlik)
                 if result is None:
-                    return (sub, True)  # tekshirib bo'lmadi → o'tkazamiz
+                    return (sub, False)
                 return (sub, result)
             else:
-                # ✅ Tashqi platformalar: tekshirilmaydi, lekin "Obuna bo'ldim" bosilgani uchun bajarilgan
+                # Non-telegram turlar: "Obuna bo'ldim" bosilganda darhol True
                 return (sub, True)
         except asyncio.TimeoutError:
-            return (sub, True)
+            return (sub, False)
         except Exception as e:
             print(f"check_single_sub xatosi: {e}")
-            return (sub, True)
+            return (sub, False)
 
-    results = await asyncio.gather(*[check_single_sub(sub) for sub in still_incomplete])
+    results = await asyncio.gather(
+        *[check_single_sub(sub) for sub in still_incomplete],
+        return_exceptions=True
+    )
 
-    sub_positions = {s["id"]: i for i, s in enumerate(subs, start=1)}
-    failed = [f"❌ {sub_positions.get(sub['id'], '?')}-kanal" for sub, is_ok in results if not is_ok]
+    # ✅ TUZATILDI: pozitsiyalar faqat still_incomplete bo'yicha
+    failed = []
+    for idx, r in enumerate(results, start=1):
+        if isinstance(r, Exception):
+            failed.append(f"❌ {idx}-kanal")
+            continue
+        sub, is_ok = r
+        if not is_ok:
+            failed.append(f"❌ {idx}-kanal")
 
     if failed:
         msg_text = (
@@ -486,19 +482,31 @@ async def confirm_all_subs_callback(update: Update, context: CallbackContext):
             "\n".join(failed) +
             "\n\nIltimos, avval ularga obuna bo'ling va qayta tekshiring."
         )
-        await query.edit_message_text(msg_text, disable_web_page_preview=True)
+        try:
+            await query.edit_message_text(msg_text, disable_web_page_preview=True)
+        except Exception as e:
+            print(f"edit_message_text xatosi: {e}")
         return
 
-    # ✅ Barcha muvaffaqiyatli — belgilash
-    for sub in still_incomplete:
-        await mark_user_completed_sub(user_id, sub["id"])
+    # ✅ TUZATILDI: barcha muvaffaqiyatli obunalarni belgilash
+    for r in results:
+        if isinstance(r, Exception):
+            continue
+        sub, is_ok = r
+        if is_ok and "id" in sub:
+            await mark_user_completed_sub(user_id, sub["id"])
 
     invalidate_mandatory_cache()
 
-    await query.edit_message_text("✅ Ajoyib! Barcha kanallarga obuna bo'lgansiz. Botdan foydalanishingiz mumkin!")
+    try:
+        await query.edit_message_text(
+            "✅ Ajoyib! Barcha kanallarga obuna bo'lgansiz. Botdan foydalanishingiz mumkin!"
+        )
+    except Exception as e:
+        print(f"edit_message_text xatosi: {e}")
 
     if "mandatory_msg_id" in context.user_data:
-        del context.user_data["mandatory_msg_id"]
+        context.user_data.pop("mandatory_msg_id", None)
 
     await start_after_subs(update, context)
 
@@ -510,13 +518,16 @@ async def start_after_subs(update: Update, context: CallbackContext):
     else:
         message = update.message
 
-    await message.reply_text(
-        f"🎬 Kino botiga xush kelibsiz!\n"
-        f"📣 Kino kanalimiz: {CHANNEL_USERNAME}\n\n"
-        f"Film kodini raqamlarda yuboring.\n"
-        f"Admin: /admin\n\n"
-        f"🔗 /referral - referal havolangiz va statistikangiz"
-    )
+    try:
+        await message.reply_text(
+            f"🎬 Kino botiga xush kelibsiz!\n"
+            f"📣 Kino kanalimiz: {CHANNEL_USERNAME}\n\n"
+            f"Film kodini raqamlarda yuboring.\n"
+            f"Admin: /admin\n\n"
+            f"🔗 /referral - referal havolangiz va statistikangiz"
+        )
+    except Exception as e:
+        print(f"start_after_subs xatosi: {e}")
     safe_task(send_ad(context.bot, user_id))
 
 
@@ -524,7 +535,10 @@ async def start_after_subs(update: Update, context: CallbackContext):
 async def start(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     referral_code = context.args[0] if context.args else None
-    await register_user_start(user_id, referral_code)
+    try:
+        await register_user_start(user_id, referral_code)
+    except Exception as e:
+        print(f"register_user_start xatosi: {e}")
 
     if await check_and_handle_mandatory_subs(update, context):
         return
@@ -532,7 +546,7 @@ async def start(update: Update, context: CallbackContext):
     await start_after_subs(update, context)
 
 
-# ======================== Referal ========================
+# ======================== Referal (foydalanuvchi) ========================
 async def referral(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     if await check_and_handle_mandatory_subs(update, context):
@@ -650,19 +664,21 @@ async def _broadcast_task(msg, progress_msg, user_ids, total):
             try:
                 await msg.copy(chat_id=uid)
                 sent += 1
-            except:
+            except Exception as e:
+                # ✅ TUZATILDI: aniq exception log
+                print(f"Broadcast xato (uid={uid}): {e}")
                 failed += 1
 
     tasks = [asyncio.create_task(send_to_user(uid)) for uid in user_ids]
-    await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
     try:
         await progress_msg.edit_text(
             f"✅ Yuborildi: {sent}/{total}\n"
             f"❌ Xato: {failed}"
         )
-    except:
-        pass
+    except Exception as e:
+        print(f"progress_msg edit xatosi: {e}")
 
 
 # ======================== Video qo'shish ========================
@@ -713,7 +729,8 @@ async def addvideo_custom_code(update: Update, context: CallbackContext):
     if code.startswith("/"):
         code = code[1:]
 
-    if not code.isdigit():
+    # ✅ TUZATILDI: faqat ASCII raqamlar
+    if not (code.isascii() and code.isdigit()):
         await update.message.reply_text("❌ Kod faqat raqamlardan iborat bo'lishi kerak. Qaytadan kiriting:")
         return WAITING_FOR_CUSTOM_CODE
 
@@ -794,7 +811,7 @@ async def delvideo(update: Update, context: CallbackContext):
         await update.message.reply_text("📛 Kodni kiriting: /delvideo 123")
         return
     code = context.args[0].strip()
-    if not code.isdigit():
+    if not (code.isascii() and code.isdigit()):
         await update.message.reply_text("❌ Kod faqat raqamlardan iborat bo'lishi kerak.")
         return
     video = await get_video(code)
@@ -943,8 +960,8 @@ async def add_mandatory(update: Update, context: CallbackContext):
             "Ishlatish: /add_mandatory <type> <identifier> <limit> [chat_id]\n\n"
             "Masalan:\n"
             "/add_mandatory telegram @my_channel 5000\n"
-            "/add_mandatory instagram https://instagram.com/my_page 999999\n"
-            "/add_mandatory invite https://t.me/+abc123 1000 -1001234567890"
+            "/add_mandatory invite https://t.me/+abc123 1000 -1001234567890\n"
+            "/add_mandatory bot @kinobot 3000"
         )
         return
 
@@ -1037,7 +1054,8 @@ async def handle_code(update: Update, context: CallbackContext):
         return
 
     text = update.message.text.strip()
-    if not text.isdigit():
+    # ✅ TUZATILDI: faqat ASCII raqamlar
+    if not (text.isascii() and text.isdigit()):
         await update.message.reply_text("🤔 Iltimos, faqat raqamlardan iborat kod yuboring.")
         return
 
@@ -1054,8 +1072,8 @@ async def handle_code(update: Update, context: CallbackContext):
             await update.message.reply_text("❌ Video yuborishda xatolik yuz berdi.")
             return
         links_msg = (
-            f"📱 Instagram: {INSTAGRAM_URL}\n"
-            f"📣 Kino kanal: {CHANNEL_USERNAME}"
+            f"📱 Instagram: https://www.instagram.com/kino_sevarlar\n"
+            f"📣 Kino kanal: @kinolar_olami_i7 {CHANNEL_USERNAME}"
         )
         await update.message.reply_text(links_msg)
         safe_task(send_ad(context.bot, user_id))
@@ -1097,6 +1115,7 @@ async def main():
     global bot_application
     await init_db()
 
+    # ✅ TUZATILDI: permanent subs ni qo'shish, lekin mavjudligini tekshirish
     existing_subs = await list_mandatory_subscriptions()
     existing_identifiers = [s["identifier"] for s in existing_subs]
     for sub in PERMANENT_MANDATORY_SUBS:
@@ -1111,8 +1130,10 @@ async def main():
     bot_application = Application.builder().token(BOT_TOKEN).build()
     private_filter = filters.ChatType.PRIVATE
 
+    # Activity tracker (eng birinchi)
     bot_application.add_handler(TypeHandler(Update, track_activity), group=-1)
 
+    # Asosiy komandalar
     bot_application.add_handler(CommandHandler("start", start, filters=private_filter))
     bot_application.add_handler(CommandHandler("admin", admin, filters=private_filter))
     bot_application.add_handler(CommandHandler("stats", stats, filters=private_filter))
@@ -1129,6 +1150,7 @@ async def main():
     bot_application.add_handler(CommandHandler("list_mandatory", list_mandatory, filters=private_filter))
     bot_application.add_handler(CallbackQueryHandler(confirm_all_subs_callback, pattern="^confirm_all_subs$"))
 
+    # ======================== addvideo ConversationHandler ========================
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("addvideo", addvideo_start, filters=private_filter)],
         states={
@@ -1162,6 +1184,7 @@ async def main():
     )
     bot_application.add_handler(conv_handler)
 
+    # ======================== broadcast ConversationHandler ========================
     broadcast_conv = ConversationHandler(
         entry_points=[CommandHandler("broadcast", broadcast_start, filters=private_filter)],
         states={
@@ -1176,6 +1199,7 @@ async def main():
     )
     bot_application.add_handler(broadcast_conv)
 
+    # ======================== createref ConversationHandler ========================
     ref_conv = ConversationHandler(
         entry_points=[CommandHandler("createref", createref_start, filters=private_filter)],
         states={
@@ -1190,6 +1214,7 @@ async def main():
     )
     bot_application.add_handler(ref_conv)
 
+    # ======================== setad ConversationHandler ========================
     ad_conv = ConversationHandler(
         entry_points=[CommandHandler("setad", setad_start, filters=private_filter)],
         states={
@@ -1204,10 +1229,12 @@ async def main():
     )
     bot_application.add_handler(ad_conv)
 
+    # Oxirgi handler (kod yuborish)
     bot_application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND & private_filter, handle_code)
     )
 
+    # ======================== Retry bilan initialize ========================
     max_retries = 10
     for attempt in range(1, max_retries + 1):
         try:
@@ -1224,6 +1251,7 @@ async def main():
             print(f"⏳ {wait} soniyadan keyin qayta urinish...")
             await asyncio.sleep(wait)
 
+    # ======================== Retry bilan webhook ========================
     for attempt in range(1, 6):
         try:
             await bot_application.bot.set_webhook(
@@ -1250,6 +1278,7 @@ async def main():
     except Exception as e:
         print(f"⚠️ Webhook info xatosi: {e}")
 
+    # ======================== SELF-PING + WATCHDOG ========================
     asyncio.create_task(self_ping())
     asyncio.create_task(webhook_watchdog())
     print("💓 Self-ping (1 daqiqa) va watchdog (4 daqiqa) ishga tushdi")
